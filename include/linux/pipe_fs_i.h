@@ -60,6 +60,9 @@ struct pipe_inode_info {
 	struct fasync_struct *fasync_writers;
 	struct pipe_buffer *bufs;
 	struct user_struct *user;
+#ifdef CONFIG_SYSCALL_ISOLATION
+	int use_pv_page;
+#endif // CONFIG_SYSCALL_ISOLATION
 };
 
 /*

@@ -65,6 +65,17 @@ config PAGE_TABLE_ISOLATION
 
 	  See Documentation/x86/pti.rst for more details.
 
+config SYSCALL_ISOLATION
+	bool "System call isolation"
+	default y
+	depends on !X86_PAE
+	help
+	  This is an experimental feature to allow executing system
+	  calls in an isolated address space.
+
+	  If you are unsure how to answer this question, answer N.
+
+
 config SECURITY_INFINIBAND
 	bool "Infiniband Security Hooks"
 	depends on SECURITY && INFINIBAND

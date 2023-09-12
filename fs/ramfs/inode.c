@@ -288,3 +288,189 @@ static int __init init_ramfs_fs(void)
 	return register_filesystem(&ramfs_fs_type);
 }
 fs_initcall(init_ramfs_fs);
+
+#ifdef CONFIG_SYSCALL_ISOLATION
+
+#include <linux/sci.h>
+
+static const struct inode_operations pfs_dir_inode_operations;
+struct inode *pfs_get_inode(struct super_block *sb, const struct inode *dir,
+			    umode_t mode, dev_t dev)
+{
+	struct inode *inode = new_inode(sb);
+
+	if (!inode)
+		return NULL;
+
+	inode->i_ino = get_next_ino();
+	inode_init_owner(inode, dir, mode);
+	inode->i_mapping->a_ops = &pfs_aops;
+	mapping_set_gfp_mask(inode->i_mapping, GFP_KERNEL);
+	mapping_set_unevictable(inode->i_mapping);
+	inode->i_atime = inode->i_mtime = inode->i_ctime = current_time(inode);
+	switch (mode & S_IFMT) {
+	case S_IFREG:
+		inode->i_op = &ramfs_file_inode_operations;
+		inode->i_fop = &ramfs_file_operations;
+		break;
+	case S_IFDIR:
+		inode->i_op = &pfs_dir_inode_operations;
+		inode->i_fop = &simple_dir_operations;
+
+		/* directory inodes start off with i_nlink == 2 (for "." entry) */
+		inc_nlink(inode);
+		break;
+	case S_IFLNK:
+		inode->i_op = &page_symlink_inode_operations;
+		inode_nohighmem(inode);
+		break;
+	default:
+		init_special_inode(inode, mode, dev);
+		break;
+	}
+
+	return inode;
+}
+
+/*
+ * File creation. Allocate an inode, and we're done..
+ */
+/* SMP-safe */
+static int pfs_mknod(struct inode *dir, struct dentry *dentry, umode_t mode,
+		     dev_t dev)
+{
+	struct inode *inode = pfs_get_inode(dir->i_sb, dir, mode, dev);
+
+	if (!inode)
+		return -ENOSPC;
+
+	d_instantiate(dentry, inode);
+	dget(dentry); /* Extra count - pin the dentry in core */
+	dir->i_mtime = dir->i_ctime = current_time(dir);
+
+	return 0;
+}
+
+static int pfs_mkdir(struct inode *dir, struct dentry *dentry, umode_t mode)
+{
+	int retval = pfs_mknod(dir, dentry, mode | S_IFDIR, 0);
+	if (!retval)
+		inc_nlink(dir);
+	return retval;
+}
+
+static int pfs_create(struct inode *dir, struct dentry *dentry, umode_t mode,
+		      bool excl)
+{
+	return pfs_mknod(dir, dentry, mode | S_IFREG, 0);
+}
+
+static int pfs_symlink(struct inode *dir, struct dentry *dentry,
+		       const char *symname)
+{
+	struct inode *inode;
+	int error = -ENOSPC;
+
+	inode = pfs_get_inode(dir->i_sb, dir, S_IFLNK | S_IRWXUGO, 0);
+	if (!inode)
+		return -ENOSPC;
+
+	error = page_symlink(inode, symname, strlen(symname) + 1);
+	if (error)
+		iput(inode);
+	else {
+		d_instantiate(dentry, inode);
+		dget(dentry);
+		dir->i_mtime = dir->i_ctime = current_time(dir);
+	}
+
+	return error;
+}
+
+static const struct inode_operations pfs_dir_inode_operations = {
+	.create = pfs_create,
+	.lookup = simple_lookup,
+	.link = simple_link,
+	.unlink = simple_unlink,
+	.symlink = pfs_symlink,
+	.mkdir = pfs_mkdir,
+	.rmdir = simple_rmdir,
+	.mknod = pfs_mknod,
+	.rename = simple_rename,
+};
+
+#define PFS_MAGIC 0x20000610
+
+static int shared_pfs_fill_super(struct super_block *sb, struct fs_context *fc)
+{
+	struct ramfs_fs_info *fsi = sb->s_fs_info;
+	struct inode *inode;
+
+	sb->s_maxbytes = MAX_LFS_FILESIZE;
+	sb->s_blocksize = PAGE_SIZE;
+	sb->s_blocksize_bits = PAGE_SHIFT;
+	sb->s_magic = PFS_MAGIC;
+	sb->s_op = &ramfs_ops;
+	sb->s_time_gran = 1;
+
+	inode = pfs_get_inode(sb, NULL, S_IFDIR | fsi->mount_opts.mode, 0);
+	sb->s_root = shared_pfs_d_make_root(inode);
+	if (!sb->s_root)
+		return -ENOMEM;
+
+	return 0;
+}
+
+// private-ramfs should be inited once at special dir
+static int shared_pfs_get_tree(struct fs_context *fc)
+{
+	static DEFINE_SPINLOCK(init_lock);
+	static int init = 0;
+
+	spin_lock(&init_lock);
+	if (init) {
+		spin_unlock(&init_lock);
+		return -EBUSY;
+	} else
+		init = 1;
+	spin_unlock(&init_lock);
+
+	return get_tree_nodev(fc, shared_pfs_fill_super);
+}
+
+static const struct fs_context_operations pfs_context_ops = {
+	.free = ramfs_free_fc,
+	.parse_param = ramfs_parse_param,
+	.get_tree = shared_pfs_get_tree,
+};
+
+int pfs_init_fs_context(struct fs_context *fc)
+{
+	int error = ramfs_init_fs_context(fc);
+	if (error)
+		return error;
+
+	fc->ops = &pfs_context_ops;
+
+	return 0;
+}
+
+static void pfs_kill_sb(struct super_block *sb)
+{
+}
+
+static struct file_system_type pfs_fs_type = {
+	.name = "private-ramfs",
+	.init_fs_context = pfs_init_fs_context,
+	.parameters = &ramfs_fs_parameters,
+	.kill_sb = pfs_kill_sb,
+	.fs_flags = FS_USERNS_MOUNT,
+};
+
+static int __init init_pfs_fs(void)
+{
+	return register_filesystem(&pfs_fs_type);
+}
+fs_initcall(init_pfs_fs);
+
+#endif /* CONFIG_SYSCALL_ISOLATION */

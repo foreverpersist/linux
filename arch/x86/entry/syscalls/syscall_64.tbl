@@ -357,6 +357,20 @@
 433	common	fspick			__x64_sys_fspick
 434	common	pidfd_open		__x64_sys_pidfd_open
 435	common	clone3			__x64_sys_clone3/ptregs
+#for the sci!
+437	64	sci_write_dmesg	__x64_sys_sci_write_dmesg
+438	64	sci_write_dmesg_bad	__x64_sys_sci_write_dmesg_bad
+439	64	ksys_sci_secure_test	__x64_sys_ksys_sci_secure_test
+440	64	ksys_sci_secure_get_array2	__x64_sys_ksys_sci_secure_get_array2
+
+442	64	sci_private_vmalloc  __x64_sys_sci_private_vmalloc
+443	64	sci_private_vfree  __x64_sys_sci_private_vfree
+444	64	sci_private_read  __x64_sys_sci_private_read
+445	64	sci_private_write  __x64_sys_sci_private_write
+446	64	sci_ctl  __x64_sys_sci_ctl
+447	64	mutant_ctl2  __x64_sys_mutant_ctl2
+448	64	mutant_fork  __x64_sys_mutant_fork
+449	64	mutant_exit_template	__x64_sys_mutant_exit_template
 
 #
 # x32-specific system call numbers start at 512 to avoid cache impact

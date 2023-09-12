@@ -51,6 +51,7 @@
 #include <linux/printk.h>
 #include <linux/dax.h>
 #include <linux/psi.h>
+#include <linux/sci.h>
 
 #include <asm/tlbflush.h>
 #include <asm/div64.h>
@@ -103,6 +104,10 @@ struct scan_control {
 
 	/* One of the zones is ready for compaction */
 	unsigned int compaction_ready:1;
+
+#ifdef CONFIG_SYSCALL_ISOLATION
+	unsigned int anon_pvp_pages:1;
+#endif
 
 	/* Allocation order */
 	s8 order;
@@ -1528,7 +1533,14 @@ keep:
 
 	mem_cgroup_uncharge_list(&free_pages);
 	try_to_unmap_flush();
+#ifdef CONFIG_SYSCALL_ISOLATION
+	if (sc->anon_pvp_pages)
+		free_unref_anon_pvp_cache_page_list(&free_pages);
+	else
+		free_unref_page_list(&free_pages);
+#else
 	free_unref_page_list(&free_pages);
+#endif /* CONFIG_SYSCALL_ISOLATION */
 
 	list_splice(&ret_pages, page_list);
 	count_vm_events(PGACTIVATE, pgactivate);
@@ -4404,3 +4416,36 @@ void check_move_unevictable_pages(struct pagevec *pvec)
 	}
 }
 EXPORT_SYMBOL_GPL(check_move_unevictable_pages);
+
+#ifdef CONFIG_SYSCALL_ISOLATION
+unsigned long shrink_anon_pvp_pages_task(unsigned long stage,
+					 unsigned long nr_shrinked)
+{
+	struct scan_control sc;
+	struct page *page, *next;
+	struct reclaim_stat stat;
+	LIST_HEAD(try_free_pages);
+
+	memset(&sc, 0, sizeof(struct scan_control));
+	sc.may_writepage = 1;
+	sc.may_unmap = 1;
+	sc.anon_pvp_pages = 1;
+	sc.gfp_mask = GFP_KERNEL;
+
+	list_for_each_entry_safe (page, next, &anon_pvp_page_list, lru) {
+		if (!nr_shrinked)
+			break;
+		if (!stage)
+			get_page_unless_zero(page);
+		list_move(&page->lru, &try_free_pages);
+	}
+
+	nr_shrinked = shrink_page_list(&try_free_pages, NULL, &sc,
+				       TTU_IGNORE_ACCESS, &stat, true);
+
+	list_splice(&try_free_pages, &anon_pvp_page_list);
+
+	return nr_shrinked;
+}
+EXPORT_SYMBOL(shrink_anon_pvp_pages_task);
+#endif /* CONFIG_SYSCALL_ISOLATION */

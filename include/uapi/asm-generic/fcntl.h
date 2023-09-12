@@ -63,6 +63,8 @@
 #define O_CLOEXEC	02000000	/* set close_on_exec */
 #endif
 
+#define O_PRIVATE	010000000
+
 /*
  * Before Linux 2.6.33 only O_DSYNC semantics were implemented, but using
  * the O_SYNC flag.  We continue to use the existing numerical value

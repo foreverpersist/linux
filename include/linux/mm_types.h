@@ -219,6 +219,10 @@ struct page {
 #ifdef LAST_CPUPID_NOT_IN_PAGE_FLAGS
 	int _last_cpupid;
 #endif
+
+#ifdef CONFIG_SYSCALL_ISOLATION
+		unsigned long pv_addr; // private-vmalloc addr
+#endif // CONFIG_SYSCALL_ISOLATION
 } _struct_page_alignment;
 
 static inline atomic_t *compound_mapcount_ptr(struct page *page)

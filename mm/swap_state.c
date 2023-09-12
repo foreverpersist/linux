@@ -21,6 +21,7 @@
 #include <linux/vmalloc.h>
 #include <linux/swap_slots.h>
 #include <linux/huge_mm.h>
+#include <linux/sci.h>
 
 #include <asm/pgtable.h>
 #include "internal.h"
@@ -396,7 +397,17 @@ struct page *__read_swap_cache_async(swp_entry_t entry, gfp_t gfp_mask,
 		 * Get a new page to read into from swap.
 		 */
 		if (!new_page) {
+#ifdef CONFIG_SYSCALL_ISOLATION
+			if (!(current->sci && (vma->vm_flags & VM_PV_PROTECT)))
+				new_page = alloc_page_vma(gfp_mask, vma, addr);
+			else {
+				new_page = get_anon_pvp_cache_page(true);
+				if (unlikely(!new_page))
+					new_page = alloc_page_vma(gfp_mask, vma, addr);
+			}
+#else
 			new_page = alloc_page_vma(gfp_mask, vma, addr);
+#endif /* CONFIG_SYSCALL_ISOLATION */
 			if (!new_page)
 				break;		/* Out of memory */
 		}
@@ -424,7 +435,12 @@ struct page *__read_swap_cache_async(swp_entry_t entry, gfp_t gfp_mask,
 		if (likely(!err)) {
 			/* Initiate read into locked page */
 			SetPageWorkingset(new_page);
+#ifdef CONFIG_SYSCALL_ISOLATION
+			if (!(current->sci && (vma->vm_flags & VM_PV_PROTECT)))
+				lru_cache_add_anon(new_page);
+#else
 			lru_cache_add_anon(new_page);
+#endif /* CONFIG_SYSCALL_ISOLATION */
 			*new_page_allocated = true;
 			return new_page;
 		}

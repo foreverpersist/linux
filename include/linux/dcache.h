@@ -251,6 +251,10 @@ extern void d_invalidate(struct dentry *);
 /* only used at mount-time */
 extern struct dentry * d_make_root(struct inode *);
 
+#ifdef CONFIG_SYSCALL_ISOLATION
+extern struct dentry *shared_pfs_d_make_root(struct inode *);
+#endif // CONFIG_SYSCALL_ISOLATION
+
 /* <clickety>-<click> the ramfs-type tree */
 extern void d_genocide(struct dentry *);
 

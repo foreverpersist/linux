@@ -549,6 +549,14 @@
 		*(.sched.text)						\
 		__sched_text_end = .;
 
+/* priviledged.text is used in Mutant */
+#define PRIVILEDGED_TEXT							\
+		. = ALIGN(PMD_PAGE_SIZE);				\
+		__priviledged_text_start = .;					\
+		*(.priviledged.text)						\
+		. = ALIGN(PMD_PAGE_SIZE);					\
+		__priviledged_text_end = .;
+
 /* spinlock.text is aling to function alignment to secure we have same
  * address even at second ld pass when generating System.map */
 #define LOCK_TEXT							\

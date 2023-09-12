@@ -94,6 +94,7 @@
 #include <linux/livepatch.h>
 #include <linux/thread_info.h>
 #include <linux/stackleak.h>
+#include <linux/sci.h>
 
 #include <asm/pgtable.h>
 #include <asm/pgalloc.h>
@@ -2381,6 +2382,12 @@ long _do_fork(struct kernel_clone_args *args)
 	if (IS_ERR(p))
 		return PTR_ERR(p);
 
+#ifdef CONFIG_SYSCALL_ISOLATION
+	// && current->in_isolated_syscall
+	if (current->sci)
+		sci_child_small_init(p, current->sci);
+#endif
+
 	/*
 	 * Do this prior waking up the new thread - the thread pointer
 	 * might get invalid after that point, if the thread exits quickly.
@@ -2413,6 +2420,83 @@ long _do_fork(struct kernel_clone_args *args)
 	put_pid(pid);
 	return nr;
 }
+
+#ifdef CONFIG_SYSCALL_ISOLATION
+
+long __priviledged _mutant_do_fork(struct kernel_clone_args *args, unsigned template_id)
+{
+	u64 clone_flags = args->flags;
+	struct completion vfork;
+	struct pid *pid;
+	struct task_struct *p;
+	int trace = 0;
+	long nr;
+
+	/*
+	 * Determine whether and which event to report to ptracer.  When
+	 * called from kernel_thread or CLONE_UNTRACED is explicitly
+	 * requested, no event is reported; otherwise, report if the event
+	 * for the type of forking is enabled.
+	 */
+	if (!(clone_flags & CLONE_UNTRACED)) {
+		if (clone_flags & CLONE_VFORK)
+			trace = PTRACE_EVENT_VFORK;
+		else if (args->exit_signal != SIGCHLD)
+			trace = PTRACE_EVENT_CLONE;
+		else
+			trace = PTRACE_EVENT_FORK;
+
+		if (likely(!ptrace_event_enabled(current, trace)))
+			trace = 0;
+	}
+
+	p = copy_process(NULL, trace, NUMA_NO_NODE, args);
+	add_latent_entropy();
+
+	if (IS_ERR(p))
+		return PTR_ERR(p);
+
+	if (!(clone_flags & CLONE_VM))
+		sci_child_init(p, mutant_templates[template_id]);
+
+	/*
+	 * Do this prior waking up the new thread - the thread pointer
+	 * might get invalid after that point, if the thread exits quickly.
+	 */
+	trace_sched_process_fork(current, p);
+
+	pid = get_task_pid(p, PIDTYPE_PID);
+	nr = pid_vnr(pid);
+
+	if (clone_flags & CLONE_PARENT_SETTID)
+		put_user(nr, args->parent_tid);
+
+	if (clone_flags & CLONE_VFORK) {
+		p->vfork_done = &vfork;
+		init_completion(&vfork);
+		get_task_struct(p);
+	}
+
+	wake_up_new_task(p);
+
+	/* forking complete and child started to run, tell ptracer */
+	if (unlikely(trace))
+		ptrace_event_pid(trace, pid);
+
+	if (clone_flags & CLONE_VFORK) {
+		if (!wait_for_vfork_done(p, &vfork))
+			ptrace_event_pid(PTRACE_EVENT_VFORK_DONE, pid);
+	}
+
+	put_pid(pid);
+	return nr;
+}
+#else
+long _mutant_do_fork(struct kernel_clone_args *args, unsigned template_id)
+{
+	return 0;
+}
+#endif
 
 bool legacy_clone_args_valid(const struct kernel_clone_args *kargs)
 {

@@ -346,6 +346,10 @@ static int min_extfrag_threshold;
 static int max_extfrag_threshold = 1000;
 #endif
 
+#ifdef CONFIG_SYSCALL_ISOLATION
+extern unsigned mutant_debug_level;
+#endif /* CONFIG_SYSCALL_ISOLATION */
+
 static struct ctl_table kern_table[] = {
 	{
 		.procname	= "sched_child_runs_first",
@@ -354,6 +358,15 @@ static struct ctl_table kern_table[] = {
 		.mode		= 0644,
 		.proc_handler	= proc_dointvec,
 	},
+#ifdef CONFIG_SYSCALL_ISOLATION
+	{
+		.procname = "mutant_debug_level",
+		.data = &mutant_debug_level,
+		.maxlen = sizeof(unsigned int),
+		.mode = 0644,
+		.proc_handler = proc_dointvec,
+	},
+#endif /* CONFIG_SYSCALL_ISOLATION */
 #ifdef CONFIG_SCHED_DEBUG
 	{
 		.procname	= "sched_min_granularity_ns",

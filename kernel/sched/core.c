@@ -14,6 +14,7 @@
 
 #include <asm/switch_to.h>
 #include <asm/tlb.h>
+#include <linux/sci.h>
 
 #include "../workqueue_internal.h"
 #include "../smpboot.h"
@@ -3445,18 +3446,26 @@ context_switch(struct rq *rq, struct task_struct *prev,
 	/*
 	 * kernel -> kernel   lazy + transfer active
 	 *   user -> kernel   lazy + mmgrab() active
+	 *  sci u -> kernel   mmgrab() active + switch?
 	 *
 	 * kernel ->   user   switch + mmdrop() active
 	 *   user ->   user   switch
 	 */
 	if (!next->mm) {                                // to kernel
-		enter_lazy_tlb(prev->active_mm, next);
+		if (prev->sci && prev->mm) { // from sci user
+			next->active_mm = &init_mm;
+			mmgrab(&init_mm);
+			membarrier_switch_mm(rq, prev->active_mm, &init_mm);
+			switch_mm_irqs_off(prev->active_mm, &init_mm, next);
+		} else {
+			enter_lazy_tlb(prev->active_mm, next);
 
-		next->active_mm = prev->active_mm;
-		if (prev->mm)                           // from user
-			mmgrab(prev->active_mm);
-		else
-			prev->active_mm = NULL;
+			next->active_mm = prev->active_mm;
+			if (prev->mm)                           // from user
+				mmgrab(prev->active_mm);
+			else
+				prev->active_mm = NULL;
+		}
 	} else {                                        // to user
 		membarrier_switch_mm(rq, prev->active_mm, next->mm);
 		/*

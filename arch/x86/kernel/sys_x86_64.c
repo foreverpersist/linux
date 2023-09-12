@@ -94,6 +94,9 @@ SYSCALL_DEFINE6(mmap, unsigned long, addr, unsigned long, len,
 	if (off & ~PAGE_MASK)
 		goto out;
 
+	if (current->sci && (flags & MAP_ANONYMOUS) && (flags & MAP_PRIVATE))
+		flags |= MAP_PV_PROTECT;
+
 	error = ksys_mmap_pgoff(addr, len, prot, flags, fd, off >> PAGE_SHIFT);
 out:
 	return error;

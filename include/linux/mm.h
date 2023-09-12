@@ -319,6 +319,11 @@ extern unsigned int kobjsize(const void *objp);
 #endif
 #endif /* CONFIG_ARCH_HAS_PKEYS */
 
+#ifdef CONFIG_SYSCALL_ISOLATION
+#define VM_PV_PROTECT_BIT  40
+#define VM_PV_PROTECT BIT(VM_PV_PROTECT_BIT)
+#endif // CONFIG_SYSCALL_ISOLATION
+
 #if defined(CONFIG_X86)
 # define VM_PAT		VM_ARCH_1	/* PAT reserves whole VMA at once (x86) */
 #elif defined(CONFIG_PPC)
@@ -393,7 +398,11 @@ extern pgprot_t protection_map[16];
 #define FAULT_FLAG_USER		0x40	/* The fault originated in userspace */
 #define FAULT_FLAG_REMOTE	0x80	/* faulting for non current tsk/mm */
 #define FAULT_FLAG_INSTRUCTION  0x100	/* The fault was during an instruction fetch */
+#ifdef CONFIG_SYSCALL_ISOLATION
+#define FAULT_FLAG_PVP      0x200   /* faulting in pvp area, i.e pv-protected anonymous page */
+#endif // CONFIG_SYSCALL_ISOLATION
 
+#ifndef CONFIG_SYSCALL_ISOLATION
 #define FAULT_FLAG_TRACE \
 	{ FAULT_FLAG_WRITE,		"WRITE" }, \
 	{ FAULT_FLAG_MKWRITE,		"MKWRITE" }, \
@@ -404,6 +413,19 @@ extern pgprot_t protection_map[16];
 	{ FAULT_FLAG_USER,		"USER" }, \
 	{ FAULT_FLAG_REMOTE,		"REMOTE" }, \
 	{ FAULT_FLAG_INSTRUCTION,	"INSTRUCTION" }
+#else
+#define FAULT_FLAG_TRACE \
+	{ FAULT_FLAG_WRITE,		"WRITE" }, \
+	{ FAULT_FLAG_MKWRITE,		"MKWRITE" }, \
+	{ FAULT_FLAG_ALLOW_RETRY,	"ALLOW_RETRY" }, \
+	{ FAULT_FLAG_RETRY_NOWAIT,	"RETRY_NOWAIT" }, \
+	{ FAULT_FLAG_KILLABLE,		"KILLABLE" }, \
+	{ FAULT_FLAG_TRIED,		"TRIED" }, \
+	{ FAULT_FLAG_USER,		"USER" }, \
+	{ FAULT_FLAG_REMOTE,		"REMOTE" }, \
+	{ FAULT_FLAG_INSTRUCTION,	"INSTRUCTION" }, \
+	{ FAULT_FLAG_PVP,	"pv-protected anonymous page" }
+#endif
 
 /*
  * vm_fault is filled by the the pagefault handler and passed to the vma's
@@ -1046,9 +1068,17 @@ static inline __must_check bool try_get_page(struct page *page)
 	return true;
 }
 
+extern int put_pvp_cache_page(struct page *);
 static inline void put_page(struct page *page)
 {
 	page = compound_head(page);
+
+#ifdef CONFIG_SYSCALL_ISOLATION
+	if (page->pv_addr == (unsigned long)-1) {
+		put_pvp_cache_page(page);
+		return;
+	}
+#endif // CONFIG_SYSCALL_ISOLATION
 
 	/*
 	 * For devmap managed pages we need to catch refcount transition from

@@ -53,4 +53,12 @@
 # define X86_CR3_PTI_PCID_USER_BIT	11
 #endif
 
+#ifdef CONFIG_SYSCALL_ISOLATION
+# if defined(X86_CR3_PTI_PCID_USER_BIT)
+#  define X86_CR3_SCI_PCID_BIT		(X86_CR3_PTI_PCID_USER_BIT - 1)
+# else
+#  define X86_CR3_SCI_PCID_BIT		11
+# endif
+#endif
+
 #endif /* _ASM_X86_PROCESSOR_FLAGS_H */

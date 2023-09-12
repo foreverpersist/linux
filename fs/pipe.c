@@ -134,6 +134,7 @@ void pipe_wait(struct pipe_inode_info *pipe)
 	pipe_lock(pipe);
 }
 
+extern void private_vfree(void *);
 static void anon_pipe_buf_release(struct pipe_inode_info *pipe,
 				  struct pipe_buffer *buf)
 {
@@ -146,6 +147,10 @@ static void anon_pipe_buf_release(struct pipe_inode_info *pipe,
 	 */
 	if (page_count(page) == 1 && !pipe->tmp_page)
 		pipe->tmp_page = page;
+#ifdef CONFIG_SYSCALL_ISOLATION
+	else if (pipe->use_pv_page)
+		private_vfree((void *)page->pv_addr);
+#endif /* CONFIG_SYSCALL_ISOLATION */
 	else
 		put_page(page);
 }
@@ -283,8 +288,14 @@ static bool pipe_buf_can_merge(struct pipe_buffer *buf)
 	return buf->ops == &anon_pipe_buf_ops;
 }
 
-static ssize_t
-pipe_read(struct kiocb *iocb, struct iov_iter *to)
+static inline int pipe_copy_page_to_iter(struct pipe_inode_info *pipe,
+					 void *page, int offset, size_t bytes,
+					 struct iov_iter *to)
+{
+	return copy_page_to_iter(page, offset, bytes, to);
+}
+
+static ssize_t pipe_read(struct kiocb *iocb, struct iov_iter *to)
 {
 	size_t total_len = iov_iter_count(to);
 	struct file *filp = iocb->ki_filp;
@@ -318,7 +329,8 @@ pipe_read(struct kiocb *iocb, struct iov_iter *to)
 				break;
 			}
 
-			written = copy_page_to_iter(buf->page, buf->offset, chars, to);
+			written = pipe_copy_page_to_iter(
+				pipe, buf->page, buf->offset, chars, to);
 			if (unlikely(written < chars)) {
 				if (!ret)
 					ret = -EFAULT;
@@ -390,8 +402,28 @@ static inline int is_packetized(struct file *file)
 	return (file->f_flags & O_DIRECT) != 0;
 }
 
-static ssize_t
-pipe_write(struct kiocb *iocb, struct iov_iter *from)
+extern void *private_vmalloc(unsigned long);
+extern struct page *fetch_private_vmalloc_page(unsigned long);
+static inline void *pipe_alloc_page(struct pipe_inode_info *pipe)
+{
+#ifdef CONFIG_SYSCALL_ISOLATION
+	if (pipe->use_pv_page) {
+		void *pv_addr = private_vmalloc(PAGE_SIZE);
+		return (void *)fetch_private_vmalloc_page(
+			(unsigned long)pv_addr);
+	}
+#endif /* CONFIG_SYSCALL_ISOLATION */
+	return alloc_page(GFP_HIGHUSER | __GFP_ACCOUNT);
+}
+
+static inline int pipe_copy_page_from_iter(struct pipe_inode_info *pipe,
+					   void *page, int offset, size_t bytes,
+					   struct iov_iter *from)
+{
+	return copy_page_from_iter(page, offset, bytes, from);
+}
+
+static ssize_t pipe_write(struct kiocb *iocb, struct iov_iter *from)
 {
 	struct file *filp = iocb->ki_filp;
 	struct pipe_inode_info *pipe = filp->private_data;
@@ -425,7 +457,8 @@ pipe_write(struct kiocb *iocb, struct iov_iter *from)
 			if (ret)
 				goto out;
 
-			ret = copy_page_from_iter(buf->page, offset, chars, from);
+			ret = pipe_copy_page_from_iter(pipe, buf->page, offset,
+						       chars, from);
 			if (unlikely(ret < chars)) {
 				ret = -EFAULT;
 				goto out;
@@ -454,7 +487,7 @@ pipe_write(struct kiocb *iocb, struct iov_iter *from)
 			int copied;
 
 			if (!page) {
-				page = alloc_page(GFP_HIGHUSER | __GFP_ACCOUNT);
+				page = pipe_alloc_page(pipe);
 				if (unlikely(!page)) {
 					ret = ret ? : -ENOMEM;
 					break;
@@ -467,7 +500,8 @@ pipe_write(struct kiocb *iocb, struct iov_iter *from)
 			 * FIXME! Is this really true?
 			 */
 			do_wakeup = 1;
-			copied = copy_page_from_iter(page, 0, PAGE_SIZE, from);
+			copied = pipe_copy_page_from_iter(pipe, page, 0,
+							  PAGE_SIZE, from);
 			if (unlikely(copied < PAGE_SIZE && iov_iter_count(from))) {
 				if (!ret)
 					ret = -EFAULT;
@@ -719,8 +753,16 @@ void free_pipe_info(struct pipe_inode_info *pipe)
 		if (buf->ops)
 			pipe_buf_release(pipe, buf);
 	}
-	if (pipe->tmp_page)
+	if (pipe->tmp_page) {
+#ifdef CONFIG_SYSCALL_ISOLATION
+		if (pipe->use_pv_page)
+			private_vfree((void *)pipe->tmp_page->pv_addr);
+		else
+			__free_page(pipe->tmp_page);
+#else
 		__free_page(pipe->tmp_page);
+#endif /* CONFIG_SYSCALL_ISOLATION */
+	}
 	kfree(pipe->bufs);
 	kfree(pipe);
 }
@@ -740,7 +782,7 @@ static const struct dentry_operations pipefs_dentry_operations = {
 	.d_dname	= pipefs_dname,
 };
 
-static struct inode * get_pipe_inode(void)
+static struct inode *get_pipe_inode(int flags)
 {
 	struct inode *inode = new_inode_pseudo(pipe_mnt->mnt_sb);
 	struct pipe_inode_info *pipe;
@@ -753,6 +795,17 @@ static struct inode * get_pipe_inode(void)
 	pipe = alloc_pipe_info();
 	if (!pipe)
 		goto fail_iput;
+#ifdef CONFIG_SYSCALL_ISOLATION
+	// force sci isolation to use private pipe
+	//	if (current->sci && current->sci_runtime)
+	//		flags |= O_PRIVATE;
+
+	pipe->use_pv_page = !!(flags & O_PRIVATE);
+	if (pipe->use_pv_page && !current->sci) {
+		// private pipe need sci isolation
+		goto fail_iput;
+	}
+#endif /* CONFIG_SYSCALL_ISOLATION */
 
 	inode->i_pipe = pipe;
 	pipe->files = 2;
@@ -782,7 +835,7 @@ fail_inode:
 
 int create_pipe_files(struct file **res, int flags)
 {
-	struct inode *inode = get_pipe_inode();
+	struct inode *inode = get_pipe_inode(flags);
 	struct file *f;
 
 	if (!inode)
@@ -816,8 +869,13 @@ static int __do_pipe_flags(int *fd, struct file **files, int flags)
 	int error;
 	int fdw, fdr;
 
+#ifdef CONFIG_SYSCALL_ISOLATION
+	if (flags & ~(O_CLOEXEC | O_NONBLOCK | O_DIRECT | O_PRIVATE))
+		return -EINVAL;
+#else
 	if (flags & ~(O_CLOEXEC | O_NONBLOCK | O_DIRECT))
 		return -EINVAL;
+#endif /* CONFIG_SYSCALL_ISOLATION */
 
 	error = create_pipe_files(files, flags);
 	if (error)

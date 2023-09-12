@@ -139,7 +139,16 @@ extern unsigned int ptrs_per_p4d;
 # define VMEMMAP_START		__VMEMMAP_BASE_L4
 #endif /* CONFIG_DYNAMIC_MEMORY_LAYOUT */
 
-#define VMALLOC_END		(VMALLOC_START + (VMALLOC_SIZE_TB << 40) - 1)
+#ifdef CONFIG_SYSCALL_ISOLATION
+// private vmalloc area (last 1/4 of 1TB)
+#define PRIVATE_VMALLOC_SIZE 0x0000008000000000
+#define PRIVATE_VMALLOC_END (VMALLOC_START + (VMALLOC_SIZE_TB << 40) - 1)
+#define PRIVATE_VMALLOC_START (PRIVATE_VMALLOC_END - PRIVATE_VMALLOC_SIZE + 1)
+
+#define VMALLOC_END (PRIVATE_VMALLOC_START - 1)
+#else
+#define VMALLOC_END (VMALLOC_START + (VMALLOC_SIZE_TB << 40) - 1)
+#endif // CONFIG_SYSCALL_ISOLATION
 
 #define MODULES_VADDR		(__START_KERNEL_map + KERNEL_IMAGE_SIZE)
 /* The module sections ends with the start of the fixmap */

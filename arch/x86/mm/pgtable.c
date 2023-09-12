@@ -118,12 +118,25 @@ static void pgd_ctor(struct mm_struct *mm, pgd_t *pgd)
 	/* If the pgd points to a shared pagetable level (either the
 	   ptes in non-PAE, or shared PMD in PAE), then just copy the
 	   references from swapper_pg_dir. */
+	pgd_t *target;
+
 	if (CONFIG_PGTABLE_LEVELS == 2 ||
 	    (CONFIG_PGTABLE_LEVELS == 3 && SHARED_KERNEL_PMD) ||
 	    CONFIG_PGTABLE_LEVELS >= 4) {
+#ifdef CONFIG_SYSCALL_ISOLATION
+		if (current->sci)
+			clone_pgd_range(pgd + KERNEL_PGD_BOUNDARY,
+				current->mm->pgd + KERNEL_PGD_BOUNDARY,
+				KERNEL_PGD_PTRS);
+		else
+			clone_pgd_range(pgd + KERNEL_PGD_BOUNDARY,
+				swapper_pg_dir + KERNEL_PGD_BOUNDARY,
+				KERNEL_PGD_PTRS);
+#else
 		clone_pgd_range(pgd + KERNEL_PGD_BOUNDARY,
 				swapper_pg_dir + KERNEL_PGD_BOUNDARY,
 				KERNEL_PGD_PTRS);
+#endif
 	}
 
 	/* list required to sync kernel mapping updates */

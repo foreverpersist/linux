@@ -7,3 +7,7 @@
 
 
 extern const struct inode_operations ramfs_file_inode_operations;
+
+#ifdef CONFIG_SYSCALL_ISOLATION
+extern const struct address_space_operations pfs_aops;
+#endif // CONFIG_SYSCALL_ISOLATION

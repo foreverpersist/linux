@@ -275,15 +275,43 @@ __visible inline void syscall_return_slowpath(struct pt_regs *regs)
 }
 
 #ifdef CONFIG_X86_64
+
+#ifdef CONFIG_SYSCALL_ISOLATION
+static inline void sci_syscall_enter(void)
+{
+	current->in_isolated_syscall = 1;
+	// this_cpu_write(cpu_sci.sci_syscall, 1);
+}
+
+static inline void sci_syscall_exit(void)
+{
+	// current->in_isolated_syscall = 0;
+	// this_cpu_write(cpu_sci.sci_syscall, 0);
+}
+#else
+static inline unsigned long sci_syscall_enter(unsigned long nr)
+{
+	return 0;
+}
+static inline void sci_syscall_exit(unsigned long cr3)
+{
+}
+#endif
+
 __visible void do_syscall_64(unsigned long nr, struct pt_regs *regs)
 {
 	struct thread_info *ti;
+	bool is_in_isolated;
 
 	enter_from_user_mode();
 	local_irq_enable();
 	ti = current_thread_info();
 	if (READ_ONCE(ti->flags) & _TIF_WORK_SYSCALL_ENTRY)
 		nr = syscall_trace_enter(regs);
+
+	is_in_isolated = (bool)(current->sci);
+	if (is_in_isolated)
+		sci_syscall_enter();
 
 	if (likely(nr < NR_syscalls)) {
 		nr = array_index_nospec(nr, NR_syscalls);
@@ -296,6 +324,9 @@ __visible void do_syscall_64(unsigned long nr, struct pt_regs *regs)
 		regs->ax = x32_sys_call_table[nr](regs);
 #endif
 	}
+
+	// if (is_in_isolated)
+		// sci_syscall_exit();
 
 	syscall_return_slowpath(regs);
 }

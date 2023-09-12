@@ -55,6 +55,9 @@
 #define _PAGE_PAT_LARGE (_AT(pteval_t, 1) << _PAGE_BIT_PAT_LARGE)
 #define _PAGE_SPECIAL	(_AT(pteval_t, 1) << _PAGE_BIT_SPECIAL)
 #define _PAGE_CPA_TEST	(_AT(pteval_t, 1) << _PAGE_BIT_CPA_TEST)
+#ifdef CONFIG_SYSCALL_ISOLATION
+#define _PAGE_SCI_INVALID	(_AT(pteval_t, 1) << _PAGE_BIT_SOFTW3)
+#endif
 #ifdef CONFIG_X86_INTEL_MEMORY_PROTECTION_KEYS
 #define _PAGE_PKEY_BIT0	(_AT(pteval_t, 1) << _PAGE_BIT_PKEY_BIT0)
 #define _PAGE_PKEY_BIT1	(_AT(pteval_t, 1) << _PAGE_BIT_PKEY_BIT1)
@@ -211,6 +214,10 @@ enum page_cache_mode {
 
 #define PAGE_KERNEL_IO		default_pgprot(__PAGE_KERNEL_IO)
 #define PAGE_KERNEL_IO_NOCACHE	default_pgprot(__PAGE_KERNEL_IO_NOCACHE)
+
+#ifdef CONFIG_SYSCALL_ISOLATION
+#define PAGE_KERNEL_PRIVATE	default_pgprot((__PAGE_KERNEL | _PAGE_ENC) & ~_PAGE_GLOBAL)
+#endif
 
 #endif	/* __ASSEMBLY__ */
 

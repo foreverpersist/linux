@@ -168,6 +168,17 @@ For 32-bit we have the following conventions - kernel is built with
 	.endif
 .endm
 
+#ifdef CONFIG_SYSCALL_ISOLATION
+
+#define SCI_PCID_BIT		X86_CR3_SCI_PCID_BIT
+
+#define THIS_CPU_sci_syscall   \
+	PER_CPU_VAR(cpu_sci) + SCI_SYSCALL
+
+
+
+#endif /* CONFIG_SYSCALL_ISOLATION */
+
 #ifdef CONFIG_PAGE_TABLE_ISOLATION
 
 /*

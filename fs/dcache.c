@@ -1671,6 +1671,34 @@ void d_invalidate(struct dentry *dentry)
 }
 EXPORT_SYMBOL(d_invalidate);
 
+static inline void init_dentry(struct dentry *dentry, struct super_block *sb,
+			       char *dname, const struct qstr *name)
+{
+	dentry->d_name.len = name->len;
+	dentry->d_name.hash = name->hash;
+	memcpy(dname, name->name, name->len);
+	dname[name->len] = 0;
+
+	/* Make sure we always see the terminating NUL character */
+	smp_store_release(&dentry->d_name.name, dname); /* ^^^ */
+
+	dentry->d_lockref.count = 1;
+	dentry->d_flags = 0;
+	spin_lock_init(&dentry->d_lock);
+	seqcount_init(&dentry->d_seq);
+	dentry->d_inode = NULL;
+	dentry->d_parent = dentry;
+	dentry->d_sb = sb;
+	dentry->d_op = NULL;
+	dentry->d_fsdata = NULL;
+	INIT_HLIST_BL_NODE(&dentry->d_hash);
+	INIT_LIST_HEAD(&dentry->d_lru);
+	INIT_LIST_HEAD(&dentry->d_subdirs);
+	INIT_HLIST_NODE(&dentry->d_u.d_alias);
+	INIT_LIST_HEAD(&dentry->d_child);
+	d_set_d_op(dentry, dentry->d_sb->s_d_op);
+}
+
 /**
  * __d_alloc	-	allocate a dcache entry
  * @sb: filesystem it will belong to
@@ -1716,29 +1744,7 @@ struct dentry *__d_alloc(struct super_block *sb, const struct qstr *name)
 		dname = dentry->d_iname;
 	}	
 
-	dentry->d_name.len = name->len;
-	dentry->d_name.hash = name->hash;
-	memcpy(dname, name->name, name->len);
-	dname[name->len] = 0;
-
-	/* Make sure we always see the terminating NUL character */
-	smp_store_release(&dentry->d_name.name, dname); /* ^^^ */
-
-	dentry->d_lockref.count = 1;
-	dentry->d_flags = 0;
-	spin_lock_init(&dentry->d_lock);
-	seqcount_init(&dentry->d_seq);
-	dentry->d_inode = NULL;
-	dentry->d_parent = dentry;
-	dentry->d_sb = sb;
-	dentry->d_op = NULL;
-	dentry->d_fsdata = NULL;
-	INIT_HLIST_BL_NODE(&dentry->d_hash);
-	INIT_LIST_HEAD(&dentry->d_lru);
-	INIT_LIST_HEAD(&dentry->d_subdirs);
-	INIT_HLIST_NODE(&dentry->d_u.d_alias);
-	INIT_LIST_HEAD(&dentry->d_child);
-	d_set_d_op(dentry, dentry->d_sb->s_d_op);
+	init_dentry(dentry, sb, dname, name);
 
 	if (dentry->d_op && dentry->d_op->d_init) {
 		err = dentry->d_op->d_init(dentry);
@@ -3216,3 +3222,81 @@ void __init vfs_caches_init(void)
 	bdev_cache_init();
 	chrdev_init();
 }
+
+#ifdef CONFIG_SYSCALL_ISOLATION
+#include <linux/sci.h>
+
+static struct dentry *__pfs_d_alloc(struct super_block *sb,
+				    struct dentry *dentry)
+{
+	char *dname;
+
+	dentry->d_iname[DNAME_INLINE_LEN - 1] = 0;
+	dname = dentry->d_iname;
+
+	init_dentry(dentry, sb, dname, &slash_name);
+
+	this_cpu_inc(nr_dentry);
+
+	return dentry;
+}
+
+struct dentry *private_pfs_d_make_root(struct super_block *shared_pfs_sb,
+				       struct inode *root_inode)
+{
+	struct dentry *dentry =
+		__pfs_d_alloc(shared_pfs_sb, (struct dentry *)PFS_DENTRY_POS);
+	if (dentry)
+		d_instantiate(dentry, root_inode);
+	else {
+		iput(root_inode);
+		return NULL;
+	}
+
+	return dentry;
+}
+EXPORT_SYMBOL(private_pfs_d_make_root);
+
+extern int vmap_page_range(unsigned long start, unsigned long end,
+			   pgprot_t prot, struct page **pages);
+static inline struct dentry *__shared_pfs_d_alloc(struct super_block *sb)
+{
+	struct page *p;
+
+	p = alloc_page(GFP_KERNEL);
+	if (unlikely(!p)) {
+		printk("sci: init kernel pfs failed: no page for shared dentry\n");
+		return NULL;
+	}
+	// map dentry to reserved position in init_mm
+	if (vmap_page_range(PFS_DENTRY_POS, PFS_DENTRY_POS + PAGE_SIZE,
+			    PAGE_KERNEL, &p) != 1)
+		return NULL;
+
+	if (!__pfs_d_alloc(sb, (struct dentry *)PFS_DENTRY_POS)) {
+		printk("sci: alloc kernel shared pfs failed\n");
+		return NULL;
+	}
+	return (struct dentry *)PFS_DENTRY_POS;
+}
+
+struct dentry *shared_pfs_d_make_root(struct inode *root_inode)
+{
+	struct dentry *dentry = NULL;
+
+	if (!root_inode)
+		return NULL;
+
+	dentry = __shared_pfs_d_alloc(root_inode->i_sb);
+	if (dentry)
+		d_instantiate(dentry, root_inode);
+	else {
+		iput(root_inode);
+		return NULL;
+	}
+
+	return dentry;
+}
+EXPORT_SYMBOL(shared_pfs_d_make_root);
+
+#endif /* CONFIG_SYSCALL_ISOLATION */

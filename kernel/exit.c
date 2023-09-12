@@ -63,6 +63,7 @@
 #include <linux/random.h>
 #include <linux/rcuwait.h>
 #include <linux/compat.h>
+#include <linux/sci.h>
 
 #include <linux/uaccess.h>
 #include <asm/unistd.h>
@@ -822,6 +823,8 @@ void __noreturn do_exit(long code)
 
 	sched_autogroup_exit_task(tsk);
 	cgroup_exit(tsk);
+
+	sci_child_exit(tsk);
 
 	/*
 	 * FIXME: do that only when needed, using sched_exit tracepoint

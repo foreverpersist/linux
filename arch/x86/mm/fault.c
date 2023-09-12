@@ -18,6 +18,7 @@
 #include <linux/uaccess.h>		/* faulthandler_disabled()	*/
 #include <linux/efi.h>			/* efi_recover_from_page_fault()*/
 #include <linux/mm_types.h>
+#include <linux/sci.h>			/* sci_verify_and_map()		*/
 
 #include <asm/cpufeature.h>		/* boot_cpu_has, ...		*/
 #include <asm/traps.h>			/* dotraplinkage, ...		*/
@@ -345,45 +346,109 @@ void vmalloc_sync_unmappings(void)
 	 */
 }
 
-/*
- * 64-bit:
- *
- *   Handle a fault on the vmalloc area
- */
-static noinline int vmalloc_fault(unsigned long address)
+static inline int copy_pgtable(pgd_t *src, pgd_t *target, unsigned long address)
 {
-	pgd_t *pgd, *pgd_k;
 	p4d_t *p4d, *p4d_k;
-	pud_t *pud;
-	pmd_t *pmd;
-	pte_t *pte;
+	pud_t *pud, *pud_k;
+	pmd_t *pmd, *pmd_k;
+	pte_t *pte, *pte_k;
 
-	/* Make sure we are in vmalloc area: */
-	if (!(address >= VMALLOC_START && address < VMALLOC_END))
-		return -1;
+	p4d_t *p4d_ini;
+	pud_t *pud_ini;
+	pmd_t *pmd_ini;
+	pte_t *pte_ini;
 
-	/*
-	 * Copy kernel mappings over when needed. This can also
-	 * happen within a race in page table update. In the later
-	 * case just flush:
-	 */
-	pgd = (pgd_t *)__va(read_cr3_pa()) + pgd_index(address);
-	pgd_k = pgd_offset_k(address);
-	if (pgd_none(*pgd_k))
+	if (pgd_none(*src))
 		return -1;
 
 	if (pgtable_l5_enabled()) {
-		if (pgd_none(*pgd)) {
-			set_pgd(pgd, *pgd_k);
+		if (pgd_none(*target)) {
+			set_pgd(target, *src);
 			arch_flush_lazy_mmu_mode();
 		} else {
-			BUG_ON(pgd_page_vaddr(*pgd) != pgd_page_vaddr(*pgd_k));
+			BUG_ON(pgd_page_vaddr(*target) != pgd_page_vaddr(*src));
 		}
 	}
 
 	/* With 4-level paging, copying happens on the p4d level. */
-	p4d = p4d_offset(pgd, address);
-	p4d_k = p4d_offset(pgd_k, address);
+	p4d = p4d_offset(target, address);
+	p4d_k = p4d_offset(src, address);
+	p4d_ini = p4d_offset(pgd_offset_k(address), address);
+
+	if ((address >= PRIVATE_VMALLOC_START && address < PRIVATE_VMALLOC_END)) {
+		if (!p4d_none(*p4d_k))
+			printk("src p4d: %lx\n", *p4d_k);
+		else
+			goto out1;
+
+		pud_k = pud_offset(p4d_k, address);
+		if (!pud_none(*pud_k))
+			printk("src pud: %lx\n", *pud_k);
+		else
+			goto out1;
+
+		pmd_k = pmd_offset(pud_k, address);
+		if (!pmd_none(*pmd_k))
+			printk("src pmd: %lx\n", *pmd_k);
+		else
+			goto out1;
+
+		pte_k = pte_offset_kernel(pmd_k, address);
+		if (!pte_none(*pte_k))
+			printk("src pte: %lx\n", *pte_k);
+		else
+			goto out1;
+
+out1:
+		if (!p4d_none(*p4d))
+			printk("dst p4d: %lx\n", *p4d);
+		else
+			goto out2;
+
+		pud = pud_offset(p4d, address);
+		if (!pud_none(*pud))
+			printk("dst pud: %lx\n", *pud);
+		else
+			goto out2;
+
+		pmd = pmd_offset(pud, address);
+		if (!pmd_none(*pmd))
+			printk("dst pmd: %lx\n", *pmd);
+		else
+			goto out2;
+
+		pte = pte_offset_kernel(pmd, address);
+		if (!pte_none(*pte))
+			printk("dst pte: %lx\n", *pte);
+		else
+			goto out2;
+
+out2:
+		if (!p4d_none(*p4d_ini))
+			printk("ini p4d: %lx\n", *p4d_ini);
+		else
+			goto out3;
+
+		pud_ini = pud_offset(p4d_ini, address);
+		if (!pud_none(*pud_ini))
+			printk("ini pud: %lx\n", *pud_ini);
+		else
+			goto out3;
+
+		pmd_ini = pmd_offset(pud_ini, address);
+		if (!pmd_none(*pmd_ini))
+			printk("ini pmd: %lx\n", *pmd_ini);
+		else
+			goto out3;
+
+		pte_ini = pte_offset_kernel(pmd_ini, address);
+		if (!pte_none(*pte_ini))
+			printk("ini pte: %lx\n", *pte_ini);
+		else
+			goto out3;
+	}
+out3:
+
 	if (p4d_none(*p4d_k))
 		return -1;
 
@@ -395,6 +460,34 @@ static noinline int vmalloc_fault(unsigned long address)
 	}
 
 	BUILD_BUG_ON(CONFIG_PGTABLE_LEVELS < 4);
+
+	p4d_ini = p4d_offset(pgd_offset_k(address), address);
+
+	if ((address >= PRIVATE_VMALLOC_START && address < PRIVATE_VMALLOC_END)) {
+		if (!p4d_none(*p4d_ini))
+			printk("ini p4d: %lx\n", *p4d_ini);
+		else
+			goto out4;
+
+		pud_ini = pud_offset(p4d_ini, address);
+		if (!pud_none(*pud_ini))
+			printk("ini pud: %lx\n", *pud_ini);
+		else
+			goto out4;
+
+		pmd_ini = pmd_offset(pud_ini, address);
+		if (!pmd_none(*pmd_ini))
+			printk("ini pmd: %lx\n", *pmd_ini);
+		else
+			goto out4;
+
+		pte_ini = pte_offset_kernel(pmd_ini, address);
+		if (!pte_none(*pte_ini))
+			printk("ini pte: %lx\n", *pte_ini);
+		else
+			goto out4;
+	}
+out4:
 
 	pud = pud_offset(p4d, address);
 	if (pud_none(*pud))
@@ -415,6 +508,49 @@ static noinline int vmalloc_fault(unsigned long address)
 		return -1;
 
 	return 0;
+}
+
+/*
+ * 64-bit:
+ *
+ *   Handle a fault on the vmalloc area
+ */
+static noinline int vmalloc_fault(unsigned long address)
+{
+	pgd_t *src, *target;
+
+#ifdef CONFIG_SYSCALL_ISOLATION
+	bool in_sci_isolation = current->in_isolated_syscall;
+	bool in_private_vmalloc = (address >= PRIVATE_VMALLOC_START &&
+				  address < PRIVATE_VMALLOC_END);
+
+	// (shared) private vmalloc
+	if (!(address >= VMALLOC_START && address < VMALLOC_END) &&
+	    !in_private_vmalloc)
+		return -1;
+#else
+	/* Make sure we are in vmalloc area: */
+	if (!(address >= VMALLOC_START && address < VMALLOC_END))
+		return -1;
+#endif /* CONFIG_SYSCALL_ISOLATION */
+
+	/*
+	 * Copy kernel mappings over when needed. This can also
+	 * happen within a race in page table update. In the later
+	 * case just flush:
+	 */
+	target = (pgd_t *)__va(read_cr3_pa()) + pgd_index(address);
+
+#ifdef CONFIG_SYSCALL_ISOLATION
+	if (in_sci_isolation && in_private_vmalloc)
+		src = current->sci->mm->pgd + pgd_index(address);
+	else
+		src = pgd_offset_k(address);
+#else
+	src = pgd_offset_k(address);
+#endif /* CONFIG_SYSCALL_ISOLATION */
+
+	return copy_pgtable(src, target, address);
 }
 NOKPROBE_SYMBOL(vmalloc_fault);
 
@@ -1240,6 +1376,38 @@ static int fault_in_kernel_space(unsigned long address)
 	return address >= TASK_SIZE_MAX;
 }
 
+#ifdef CONFIG_SYSCALL_ISOLATION
+static int sci_fault(struct pt_regs *regs, unsigned long hw_error_code,
+		     unsigned long address)
+{
+	struct task_struct *tsk = current;
+
+	/* DMM (64TB) access check */
+	if (address >= __PAGE_OFFSET && address <= __PAGE_OFFSET + (1UL << 46) - 1) {
+		if (tsk->in_isolated_syscall)
+			sci_child_exit(tsk);
+		no_context(regs, hw_error_code, address, SIGKILL, 0);
+		return 1;
+	}
+
+	if (!tsk->in_isolated_syscall)
+		return 0;
+
+	if (!sci_verify_and_map(regs, address, hw_error_code)) {
+		sci_child_exit(tsk);
+		no_context(regs, hw_error_code, address, SIGKILL, 0);
+	}
+
+	return 1;
+}
+#else
+static inline int sci_fault(struct pt_regs *regs, unsigned long hw_error_code,
+			    unsigned long address)
+{
+	return 0;
+}
+#endif
+
 /*
  * Called for all faults where 'address' is part of the kernel address
  * space.  Might get called for faults that originate from *code* that
@@ -1285,6 +1453,9 @@ do_kern_addr_fault(struct pt_regs *regs, unsigned long hw_error_code,
 
 	/* kprobes don't want to hook the spurious faults: */
 	if (kprobe_page_fault(regs, X86_TRAP_PF))
+		return;
+
+	if (sci_fault(regs, hw_error_code, address))
 		return;
 
 	/*

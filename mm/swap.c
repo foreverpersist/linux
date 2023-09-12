@@ -35,6 +35,7 @@
 #include <linux/uio.h>
 #include <linux/hugetlb.h>
 #include <linux/page_idle.h>
+#include <linux/sci.h>
 
 #include "internal.h"
 
@@ -801,6 +802,16 @@ void release_pages(struct page **pages, int nr)
 		page = compound_head(page);
 		if (!put_page_testzero(page))
 			continue;
+
+#ifdef CONFIG_SYSCALL_ISOLATION
+		if (page->pv_addr == -1) {
+			put_anon_pvp_cache_page(page);
+			__ClearPageActive(page);
+			__ClearPageWaiters(page);
+			mem_cgroup_uncharge(page);
+			continue;
+		}
+#endif /* CONFIG_SYSCALL_ISOLATION */
 
 		if (PageCompound(page)) {
 			if (locked_pgdat) {

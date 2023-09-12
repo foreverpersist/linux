@@ -71,6 +71,7 @@
 #include <linux/dax.h>
 #include <linux/oom.h>
 #include <linux/numa.h>
+#include <linux/sci.h>
 
 #include <asm/io.h>
 #include <asm/mmu_context.h>
@@ -151,7 +152,6 @@ static int __init init_zero_pfn(void)
 	return 0;
 }
 early_initcall(init_zero_pfn);
-
 
 #if defined(SPLIT_RSS_COUNTING)
 
@@ -2278,6 +2278,32 @@ pte_unlock:
 	return ret;
 }
 
+static inline bool cow_user_page_using_pv(struct page *dst,
+				 struct vm_fault *vmf)
+{
+	void *kaddr;
+	void __user *uaddr;
+	unsigned long addr = vmf->address;
+	bool pte_is_young;
+	pte_t *current_pte;
+
+	uaddr = (void __user *)(addr & PAGE_MASK);
+
+	kaddr = pvmap_atomic(dst);
+
+	current_pte = pte_offset_map(vmf->pmd, vmf->address);
+	pte_is_young = pte_young(*current_pte);
+	if (__copy_from_user_inatomic(kaddr, uaddr, PAGE_SIZE))
+		printk("%s, __copy_from_user_inatomic failed\n", __func__);
+
+	pvunmap_atomic(kaddr);
+
+	if (!pte_is_young)
+		*current_pte = pte_mkold(*current_pte);
+
+	return true;
+}
+
 static gfp_t __get_fault_gfp_mask(struct vm_area_struct *vma)
 {
 	struct file *vm_file = vma->vm_file;
@@ -2433,6 +2459,8 @@ static vm_fault_t wp_page_copy(struct vm_fault *vmf)
 	int page_copied = 0;
 	struct mem_cgroup *memcg;
 	struct mmu_notifier_range range;
+	bool cow_success;
+	int time;
 
 	if (unlikely(anon_vma_prepare(vma)))
 		goto oom;
@@ -2443,12 +2471,35 @@ static vm_fault_t wp_page_copy(struct vm_fault *vmf)
 		if (!new_page)
 			goto oom;
 	} else {
-		new_page = alloc_page_vma(GFP_HIGHUSER_MOVABLE, vma,
-				vmf->address);
+#ifdef CONFIG_SYSCALL_ISOLATION
+		if (vmf->flags & FAULT_FLAG_PVP)
+			new_page = get_anon_pvp_cache_page(false);
+		else
+			new_page = alloc_page_vma(GFP_HIGHUSER_MOVABLE, vma,
+						  vmf->address);
+#else
+		new_page =
+			alloc_page_vma(GFP_HIGHUSER_MOVABLE, vma, vmf->address);
+#endif /* CONFIG_SYSCALL_ISOLATION */
 		if (!new_page)
 			goto oom;
 
-		if (!cow_user_page(new_page, old_page, vmf)) {
+#ifdef CONFIG_SYSCALL_ISOLATION
+		if (vmf->flags & FAULT_FLAG_PVP) {
+			if (mutant_debug_level & MUTANT_COW_clear_time)
+				time = rdtsc();
+			cow_success = cow_user_page_using_pv(new_page, vmf);
+			if (mutant_debug_level & MUTANT_COW_clear_time) {
+				time = rdtsc() - time;
+				mutant_printk(MUTANT_COW_clear_time, "COW time: %d\n", time);
+			}
+		} else
+			cow_success = cow_user_page(new_page, old_page, vmf);
+#else
+		cow_success = cow_user_page(new_page, old_page, vmf);
+#endif /* CONFIG_SYSCALL_ISOLATION */
+
+		if (!cow_success) {
 			/*
 			 * COW failed, if the fault was solved by other,
 			 * it's fine. If not, userspace would re-fault on
@@ -2498,7 +2549,12 @@ static vm_fault_t wp_page_copy(struct vm_fault *vmf)
 		ptep_clear_flush_notify(vma, vmf->address, vmf->pte);
 		page_add_new_anon_rmap(new_page, vma, vmf->address, false);
 		mem_cgroup_commit_charge(new_page, memcg, false, false);
+#ifdef CONFIG_SYSCALL_ISOLATION
+		if (!(vma->vm_flags & VM_PV_PROTECT))
+			lru_cache_add_active_or_unevictable(new_page, vma);
+#else
 		lru_cache_add_active_or_unevictable(new_page, vma);
+#endif /* CONFIG_SYSCALL_ISOLATION */
 		/*
 		 * We call the notify macro here because, when using secondary
 		 * mmu page tables (such as kvm shadow page tables), we want the
@@ -2937,13 +2993,38 @@ vm_fault_t do_swap_page(struct vm_fault *vmf)
 		if (si->flags & SWP_SYNCHRONOUS_IO &&
 				__swap_count(entry) == 1) {
 			/* skip swapcache */
+#ifdef CONFIG_SYSCALL_ISOLATION
+			if (!(current->sci && (vma->vm_flags & VM_PV_PROTECT)))
+				page = alloc_page_vma(GFP_HIGHUSER_MOVABLE, vma,
+						      vmf->address);
+			else {
+				// only trigger by anonymous and pv-protect page
+				page = get_anon_pvp_cache_page(true);
+
+				if (unlikely(!page)) {
+					mutant_printk(
+						MUTANT_WARNING,
+						"pv-protect anonymous page alloc failed!\n");
+					page = alloc_page_vma(
+						GFP_HIGHUSER_MOVABLE, vma,
+						vmf->address);
+				}
+			}
+#else
 			page = alloc_page_vma(GFP_HIGHUSER_MOVABLE, vma,
-							vmf->address);
+					      vmf->address);
+#endif /* CONFIG_SYSCALL_ISOLATION */
+
 			if (page) {
 				__SetPageLocked(page);
 				__SetPageSwapBacked(page);
 				set_page_private(page, entry.val);
+#ifdef CONFIG_SYSCALL_ISOLATION
+				if (!(vma->vm_flags & VM_PV_PROTECT))
+					lru_cache_add_anon(page);
+#else
 				lru_cache_add_anon(page);
+#endif /* CONFIG_SYSCALL_ISOLATION */
 				swap_readpage(page, true);
 			}
 		} else {
@@ -3053,7 +3134,12 @@ vm_fault_t do_swap_page(struct vm_fault *vmf)
 	if (unlikely(page != swapcache && swapcache)) {
 		page_add_new_anon_rmap(page, vma, vmf->address, false);
 		mem_cgroup_commit_charge(page, memcg, false, false);
-		lru_cache_add_active_or_unevictable(page, vma);
+#ifdef CONFIG_SYSCALL_ISOLATION
+		if (!(vma->vm_flags & VM_PV_PROTECT))
+			lru_cache_add_active_or_unevictable(page, vma);
+#else
+		lru_cache_add_active_or_unevictable(pagenew_page, vma);
+#endif /* CONFIG_SYSCALL_ISOLATION */
 	} else {
 		do_page_add_anon_rmap(page, vma, vmf->address, exclusive);
 		mem_cgroup_commit_charge(page, memcg, true, false);
@@ -3162,7 +3248,19 @@ static vm_fault_t do_anonymous_page(struct vm_fault *vmf)
 	/* Allocate our own private page. */
 	if (unlikely(anon_vma_prepare(vma)))
 		goto oom;
+
+#ifdef CONFIG_SYSCALL_ISOLATION
+	if (current->sci && (vma->vm_flags & VM_PV_PROTECT)) {
+		page = get_anon_pvp_cache_page(true);
+		if (unlikely(!page))
+			page = alloc_zeroed_user_highpage_movable(vma,
+								  vmf->address);
+	} else
+		page = alloc_zeroed_user_highpage_movable(vma, vmf->address);
+#else
 	page = alloc_zeroed_user_highpage_movable(vma, vmf->address);
+#endif /* CONFIG_SYSCALL_ISOLATION */
+
 	if (!page)
 		goto oom;
 
@@ -3201,7 +3299,13 @@ static vm_fault_t do_anonymous_page(struct vm_fault *vmf)
 	inc_mm_counter_fast(vma->vm_mm, MM_ANONPAGES);
 	page_add_new_anon_rmap(page, vma, vmf->address, false);
 	mem_cgroup_commit_charge(page, memcg, false, false);
+
+#ifdef CONFIG_SYSCALL_ISOLATION
+	if (!(vma->vm_flags & VM_PV_PROTECT))
+		lru_cache_add_active_or_unevictable(page, vma);
+#else
 	lru_cache_add_active_or_unevictable(page, vma);
+#endif /* CONFIG_SYSCALL_ISOLATION */
 setpte:
 	set_pte_at(vma->vm_mm, vmf->address, vmf->pte, entry);
 
@@ -4077,6 +4181,11 @@ static vm_fault_t __handle_mm_fault(struct vm_area_struct *vma,
 	pgd_t *pgd;
 	p4d_t *p4d;
 	vm_fault_t ret;
+
+#ifdef CONFIG_SYSCALL_ISOLATION
+	if (vma->vm_flags & VM_PV_PROTECT)
+		vmf.flags |= FAULT_FLAG_PVP;
+#endif /* CONFIG_SYSCALL_ISOLATION */
 
 	pgd = pgd_offset(mm, address);
 	p4d = p4d_alloc(mm, pgd, address);

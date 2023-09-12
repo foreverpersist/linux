@@ -910,6 +910,13 @@ size_t copy_page_to_iter(struct page *page, size_t offset, size_t bytes,
 }
 EXPORT_SYMBOL(copy_page_to_iter);
 
+inline size_t copy_kva_to_iter(void *kva, size_t offset, size_t bytes,
+			       struct iov_iter *to)
+{
+	return copy_to_iter(kva + offset, bytes, to);
+}
+EXPORT_SYMBOL(copy_kva_to_iter);
+
 size_t copy_page_from_iter(struct page *page, size_t offset, size_t bytes,
 			 struct iov_iter *i)
 {
@@ -928,6 +935,18 @@ size_t copy_page_from_iter(struct page *page, size_t offset, size_t bytes,
 		return copy_page_from_iter_iovec(page, offset, bytes, i);
 }
 EXPORT_SYMBOL(copy_page_from_iter);
+
+size_t copy_kva_from_iter(void *to, size_t offset, size_t bytes,
+			  struct iov_iter *from)
+{
+	if (unlikely(iov_iter_is_pipe(from) || iov_iter_is_discard(from))) {
+		WARN_ON(1);
+		return 0;
+	}
+
+	return _copy_from_iter(to + offset, bytes, from);
+}
+EXPORT_SYMBOL(copy_kva_from_iter);
 
 static size_t pipe_zero(size_t bytes, struct iov_iter *i)
 {

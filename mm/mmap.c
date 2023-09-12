@@ -1566,6 +1566,11 @@ unsigned long do_mmap(struct file *file, unsigned long addr,
 			vm_flags |= VM_NORESERVE;
 	}
 
+#ifdef CONFIG_SYSCALL_ISOLATION
+	if (current->sci && (flags & MAP_PV_PROTECT))
+		vm_flags |= VM_PV_PROTECT;
+#endif /* CONFIG_SYSCALL_ISOLATION */
+
 	addr = mmap_region(file, addr, len, vm_flags, pgoff, uf);
 	if (!IS_ERR_VALUE(addr) &&
 	    ((vm_flags & VM_LOCKED) ||

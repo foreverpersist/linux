@@ -56,6 +56,9 @@ enum address_markers_idx {
 #endif
 	LOW_KERNEL_NR,
 	VMALLOC_START_NR,
+#ifdef CONFIG_SYSCALL_ISOLATION
+	PRIVATE_VMALLOC_START_NR,
+#endif
 	VMEMMAP_START_NR,
 #ifdef CONFIG_KASAN
 	KASAN_SHADOW_START_NR,
@@ -80,6 +83,9 @@ static struct addr_marker address_markers[] = {
 	[KERNEL_SPACE_NR]	= { (1UL << 63),	"Kernel Space" },
 	[LOW_KERNEL_NR]		= { 0UL,		"Low Kernel Mapping" },
 	[VMALLOC_START_NR]	= { 0UL,		"vmalloc() Area" },
+#ifdef CONFIG_SYSCALL_ISOLATION
+	[PRIVATE_VMALLOC_START_NR]	= { 0UL, "Private vmalloc() Area" },
+#endif
 	[VMEMMAP_START_NR]	= { 0UL,		"Vmemmap" },
 #ifdef CONFIG_KASAN
 	/*
@@ -610,6 +616,9 @@ static int __init pt_dump_init(void)
 #ifdef CONFIG_X86_64
 	address_markers[LOW_KERNEL_NR].start_address = PAGE_OFFSET;
 	address_markers[VMALLOC_START_NR].start_address = VMALLOC_START;
+#ifdef CONFIG_SYSCALL_ISOLATION
+	address_markers[PRIVATE_VMALLOC_START_NR].start_address = PRIVATE_VMALLOC_START;
+#endif
 	address_markers[VMEMMAP_START_NR].start_address = VMEMMAP_START;
 #ifdef CONFIG_MODIFY_LDT_SYSCALL
 	address_markers[LDT_NR].start_address = LDT_BASE_ADDR;

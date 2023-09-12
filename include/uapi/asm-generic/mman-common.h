@@ -31,6 +31,7 @@
 #define MAP_UNINITIALIZED 0x4000000	/* For anonymous mmap, memory could be
 					 * uninitialized */
 
+#define MAP_PV_PROTECT 0x8000000
 /*
  * Flags for mlock
  */

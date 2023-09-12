@@ -81,6 +81,12 @@ static inline unsigned long totalhigh_pages(void) { return 0UL; }
 static inline void *kmap(struct page *page)
 {
 	might_sleep();
+#ifdef CONFIG_SYSCALL_ISOLATION
+    // pv page is dmm-unmapped but pv-mapped
+    // pvp page is neither mapped in dmm or pv
+	if (current->sci && page->pv_addr != (unsigned long)-1 && page->pv_addr)
+		return (void *)page->pv_addr;
+#endif // CONFIG_SYSCALL_ISOLATION
 	return page_address(page);
 }
 
@@ -92,6 +98,10 @@ static inline void *kmap_atomic(struct page *page)
 {
 	preempt_disable();
 	pagefault_disable();
+#ifdef CONFIG_SYSCALL_ISOLATION
+	if (current->sci && page->pv_addr != (unsigned long)-1 && page->pv_addr)
+		return (void *)page->pv_addr;
+#endif // CONFIG_SYSCALL_ISOLATION
 	return page_address(page);
 }
 #define kmap_atomic_prot(page, prot)	kmap_atomic(page)
