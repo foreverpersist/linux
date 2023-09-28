@@ -56,6 +56,8 @@
 #define CREATE_TRACE_POINTS
 #include <trace/events/printk.h>
 
+#include <linux/proc_ns.h>
+
 #include "console_cmdline.h"
 #include "braille.h"
 #include "internal.h"
@@ -376,6 +378,7 @@ struct printk_log {
 #ifdef CONFIG_PRINTK_CALLER
 	u32 caller_id;            /* thread id or processor id */
 #endif
+	u32 ns;			/* namespace */
 }
 #ifdef CONFIG_HAVE_EFFICIENT_UNALIGNED_ACCESS
 __packed __aligned(4)
@@ -500,6 +503,12 @@ static char *log_dict(const struct printk_log *msg)
 static struct printk_log *log_from_idx(u32 idx)
 {
 	struct printk_log *msg = (struct printk_log *)(log_buf + idx);
+	unsigned int ns;
+
+	/* check whether namespace is ok */
+	ns = task_active_pid_ns(current)->ns.inum;
+	if (ns != PROC_PID_INIT_INO && ns != msg->ns)
+		return NULL;
 
 	/*
 	 * A length == 0 record is the end of buffer marker. Wrap around and
@@ -666,6 +675,7 @@ static int log_store(u32 caller_id, int facility, int level,
 #endif
 	memset(log_dict(msg) + dict_len, 0, pad_len);
 	msg->len = size;
+	msg->ns = task_active_pid_ns(current)->ns.inum;
 
 	/* insert message */
 	log_next_idx += msg->len;
@@ -918,11 +928,14 @@ static ssize_t devkmsg_read(struct file *file, char __user *buf,
 	}
 
 	msg = log_from_idx(user->idx);
-	len = msg_print_ext_header(user->buf, sizeof(user->buf),
-				   msg, user->seq);
-	len += msg_print_ext_body(user->buf + len, sizeof(user->buf) - len,
-				  log_dict(msg), msg->dict_len,
-				  log_text(msg), msg->text_len);
+	if (msg) {
+		len = msg_print_ext_header(user->buf, sizeof(user->buf),
+					   msg, user->seq);
+		len += msg_print_ext_body(user->buf + len, sizeof(user->buf) - len,
+					  log_dict(msg), msg->dict_len,
+					  log_text(msg), msg->text_len);
+	} else
+		len = 0;
 
 	user->idx = log_next(user->idx);
 	user->seq++;
@@ -1410,6 +1423,12 @@ static int syslog_print(char __user *buf, int size)
 
 		skip = syslog_partial;
 		msg = log_from_idx(syslog_idx);
+		if (!msg) {
+			syslog_idx = log_next(syslog_idx);
+			syslog_seq++;
+			logbuf_unlock_irq();
+			continue;
+		}
 		n = msg_print_text(msg, true, syslog_time, text,
 				   LOG_LINE_MAX + PREFIX_MAX);
 		if (n - syslog_partial <= size) {
@@ -1468,7 +1487,8 @@ static int syslog_print_all(char __user *buf, int size, bool clear)
 	while (seq < log_next_seq) {
 		struct printk_log *msg = log_from_idx(idx);
 
-		len += msg_print_text(msg, true, time, NULL, 0);
+		if (msg)
+			len += msg_print_text(msg, true, time, NULL, 0);
 		idx = log_next(idx);
 		seq++;
 	}
@@ -1479,7 +1499,8 @@ static int syslog_print_all(char __user *buf, int size, bool clear)
 	while (len > size && seq < log_next_seq) {
 		struct printk_log *msg = log_from_idx(idx);
 
-		len -= msg_print_text(msg, true, time, NULL, 0);
+		if (msg)
+			len -= msg_print_text(msg, true, time, NULL, 0);
 		idx = log_next(idx);
 		seq++;
 	}
@@ -1490,8 +1511,11 @@ static int syslog_print_all(char __user *buf, int size, bool clear)
 	len = 0;
 	while (len >= 0 && seq < next_seq) {
 		struct printk_log *msg = log_from_idx(idx);
-		int textlen = msg_print_text(msg, true, time, text,
-					     LOG_LINE_MAX + PREFIX_MAX);
+		int textlen = 0;
+
+		if (msg)
+			textlen = msg_print_text(msg, true, time, text,
+						     LOG_LINE_MAX + PREFIX_MAX);
 
 		idx = log_next(idx);
 		seq++;
@@ -1621,9 +1645,11 @@ int do_syslog(int type, char __user *buf, int len, int source)
 			while (seq < log_next_seq) {
 				struct printk_log *msg = log_from_idx(idx);
 
-				error += msg_print_text(msg, true, time, NULL,
-							0);
-				time = printk_time;
+				if (msg) {
+					error += msg_print_text(msg, true, time, NULL,
+								0);
+					time = printk_time;
+				}
 				idx = log_next(idx);
 				seq++;
 			}
@@ -2453,7 +2479,7 @@ skip:
 			break;
 
 		msg = log_from_idx(console_idx);
-		if (suppress_message_printing(msg->level)) {
+		if (!msg || suppress_message_printing(msg->level)) {
 			/*
 			 * Skip record we have buffered and already printed
 			 * directly to the console when we received it, and
@@ -3224,7 +3250,8 @@ bool kmsg_dump_get_line_nolock(struct kmsg_dumper *dumper, bool syslog,
 		goto out;
 
 	msg = log_from_idx(dumper->cur_idx);
-	l = msg_print_text(msg, syslog, printk_time, line, size);
+	if (msg)
+		l = msg_print_text(msg, syslog, printk_time, line, size);
 
 	dumper->cur_idx = log_next(dumper->cur_idx);
 	dumper->cur_seq++;
@@ -3319,7 +3346,8 @@ bool kmsg_dump_get_buffer(struct kmsg_dumper *dumper, bool syslog,
 	while (seq < dumper->next_seq) {
 		struct printk_log *msg = log_from_idx(idx);
 
-		l += msg_print_text(msg, true, time, NULL, 0);
+		if (msg)
+			l += msg_print_text(msg, true, time, NULL, 0);
 		idx = log_next(idx);
 		seq++;
 	}
@@ -3330,7 +3358,8 @@ bool kmsg_dump_get_buffer(struct kmsg_dumper *dumper, bool syslog,
 	while (l >= size && seq < dumper->next_seq) {
 		struct printk_log *msg = log_from_idx(idx);
 
-		l -= msg_print_text(msg, true, time, NULL, 0);
+		if (msg)
+			l -= msg_print_text(msg, true, time, NULL, 0);
 		idx = log_next(idx);
 		seq++;
 	}
@@ -3343,7 +3372,8 @@ bool kmsg_dump_get_buffer(struct kmsg_dumper *dumper, bool syslog,
 	while (seq < dumper->next_seq) {
 		struct printk_log *msg = log_from_idx(idx);
 
-		l += msg_print_text(msg, syslog, time, buf + l, size - l);
+		if (msg)
+			l += msg_print_text(msg, syslog, time, buf + l, size - l);
 		idx = log_next(idx);
 		seq++;
 	}
